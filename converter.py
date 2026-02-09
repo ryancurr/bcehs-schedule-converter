@@ -232,8 +232,17 @@ def extract_rows_from_workbook(xlsx_bytes: bytes, year: int) -> pd.DataFrame:
     return pd.DataFrame(all_rows)
 
 
-def apply_template_columns(extracted: pd.DataFrame, template_csv_bytes: bytes) -> (pd.DataFrame, pd.DataFrame):
-    tpl = pd.read_csv(bytes_to_filelike(template_csv_bytes))
+def apply_template_columns(extracted: pd.DataFrame, template_csv_source) -> (pd.DataFrame, pd.DataFrame):
+    """
+    template_csv_source can be either:
+      - bytes (uploaded), or
+      - a file path string (bundled template)
+    """
+    if isinstance(template_csv_source, (bytes, bytearray)):
+        tpl = pd.read_csv(bytes_to_filelike(template_csv_source))
+    else:
+        tpl = pd.read_csv(template_csv_source)
+
     tpl_cols = list(tpl.columns)
 
     if extracted.empty:
@@ -243,6 +252,7 @@ def apply_template_columns(extracted: pd.DataFrame, template_csv_bytes: bytes) -
 
     debug = extracted.copy()
     return out, debug
+
 
 
 # --- helper to let openpyxl/pandas read uploaded bytes cleanly ---
