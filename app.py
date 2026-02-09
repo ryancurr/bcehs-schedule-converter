@@ -35,7 +35,7 @@ def run_conversion(label: str):
     try:
         xlsx_bytes = bcehs_file.getvalue()
 
-        extracted = extract_rows_from_workbook(xlsx_bytes, int(year))
+extracted = extract_rows_from_workbook(xlsx_bytes, int(year), label)
         out_df, debug_df = apply_template_columns(extracted, str(TEMPLATE_PATH))
 
         st.success(f"{label} conversion complete! Rows exported: {len(out_df)}")
