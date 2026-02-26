@@ -8,23 +8,19 @@ from openpyxl import load_workbook
 
 # ===================== SHARED RULES (ACP + PCP) =====================
 
-# If BCEHS types a short/incorrect student name:
 STUDENT_ALIASES = {
     "rory": "Rory-lynn Bradshaw",
 }
 
-# Known non-students you never want exported (optional list)
 EXCLUDE_STUDENTS = {
     "jadyn",
     "jadyn langley",
 }
 
-# Partner markers (and common BCEHS typos)
 PARTNER_MARKERS = {
     "partner", "parnter", "partnre", "parter", "prtnr",
 }
 
-# REQUIRED: only export students whose name ends with "- Columbia"
 COLUMBIA_SUFFIX_PAT = re.compile(r"\s*-\s*Columbia\s*$", re.I)
 
 # ===================================================================
@@ -32,8 +28,8 @@ COLUMBIA_SUFFIX_PAT = re.compile(r"\s*-\s*Columbia\s*$", re.I)
 TIME_RANGE_PAT = re.compile(
     r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})|(\d{3,4})\s*[-–]\s*(\d{3,4})"
 )
-CODE_TOKEN_PAT = re.compile(r"^\d{3}[A-Za-z0-9]+$")  # e.g., 240B1DA070
-AMBULANCE_PAT = re.compile(r"^(\d{3}[A-Z]\d)", re.I)  # first 5 chars like 240B1
+CODE_TOKEN_PAT = re.compile(r"^\d{3}[A-Za-z0-9]+$")
+AMBULANCE_PAT = re.compile(r"^(\d{3}[A-Z]\d)", re.I)
 HEADER_DATE_PAT = re.compile(r"\b([A-Za-z]{3})/(\d{1,2})\b")
 
 MONTHS = {
@@ -109,10 +105,6 @@ def format_preceptor_one(name: str) -> str:
 
 
 def format_preceptor(name: str) -> str:
-    """
-    ACP sometimes has "Wilson, Travis / Johnston, Heather"
-    Convert each part to First Last and keep separators.
-    """
     if not isinstance(name, str):
         return ""
     parts = [p.strip() for p in name.split("/") if p.strip()]
@@ -130,15 +122,6 @@ def is_partner_marker(s: str) -> bool:
 
 
 def normalize_student(raw: str) -> str:
-    """
-    Shared student rules:
-    - Exclude Partner/Parnter
-    - Exclude blanks and placeholders (Student, n/a)
-    - MUST end with "- Columbia"
-    - Strip "- Columbia" in output
-    - Apply aliases
-    - Apply explicit excludes
-    """
     if not isinstance(raw, str):
         return ""
 
@@ -146,52 +129,25 @@ def normalize_student(raw: str) -> str:
     if not s:
         return ""
 
-    low = s.lower().strip()
+    low = s.lower()
     if low in {"student", "n/a", "na"}:
         return ""
     if is_partner_marker(s):
         return ""
 
-    # REQUIRED suffix
-    if not COLUMBIA_SUFFIX_PAT.search(s):
-        return ""
+    # Strip "- Columbia" if present (but DO NOT require it anymore)
+    s = re.sub(COLUMBIA_SUFFIX_PAT, "", s).strip()
 
-    # strip suffix for output
-    s = re.sub(r"\s*-\s*Columbia\s*$", "", s, flags=re.I).strip()
-
-    # alias mapping
     if s.lower() in STUDENT_ALIASES:
         s = STUDENT_ALIASES[s.lower()]
 
-    # explicit excludes
     if s.lower() in EXCLUDE_STUDENTS:
         return ""
 
     return s
 
 
-def is_group_header(text: str) -> bool:
-    """
-    PCP files have section headers like "COASTAL & SEA TO SKY" etc.
-    """
-    if not isinstance(text, str):
-        return False
-    s = text.strip()
-    if s.upper().startswith("STUDENT"):
-        return False
-    if "," in s:
-        return False
-    if s.upper() == s and len(s) >= 3:
-        return True
-    if any(k in s for k in ["Metro", "Vancouver", "Fraser", "Interior", "Island", "&", "SEA TO SKY", "COASTAL"]):
-        return len(s.split()) >= 2
-    return False
-
-
 def parse_header_dates(ws, year: int, start_col: int) -> Dict[int, dt.date]:
-    """
-    Reads row 1 headers like "Sun, Feb/1" and returns {col_index: date}.
-    """
     col_dates: Dict[int, dt.date] = {}
     for c in range(start_col, ws.max_column + 1):
         v = ws.cell(1, c).value
@@ -206,24 +162,16 @@ def parse_header_dates(ws, year: int, start_col: int) -> Dict[int, dt.date]:
     return col_dates
 
 
-# ===================== PCP EXTRACTOR =====================
+# ===================== PCP =====================
 
 def extract_pcp_rows(wb, year: int) -> pd.DataFrame:
-    """
-    PCP (.xlsx):
-    - multiple region sheets
-    - dates start column B
-    - student row is ALWAYS directly ABOVE the preceptor/shift row
-    """
-    all_rows: List[dict] = []
+    rows: List[dict] = []
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        col_dates = parse_header_dates(ws, year, start_col=2)  # B
+        col_dates = parse_header_dates(ws, year, start_col=2)
         if not col_dates:
             continue
-
-        current_group = None
 
         for r in range(2, ws.max_row + 1):
             a = ws.cell(r, 1).value
@@ -231,19 +179,11 @@ def extract_pcp_rows(wb, year: int) -> pd.DataFrame:
                 continue
 
             a_str = a.strip()
-            if not a_str:
-                continue
-
-            if a_str == "Preceptor" or a_str.upper().startswith("STUDENT"):
-                continue
-
-            if is_group_header(a_str):
-                current_group = a_str
+            if not a_str or a_str.upper().startswith("STUDENT") or a_str == "Preceptor":
                 continue
 
             preceptor = format_preceptor_one(a_str)
 
-            # PCP rule: student marker row is immediately above
             up = ws.cell(r - 1, 1).value
             if not (isinstance(up, str) and up.strip().upper().startswith("STUDENT")):
                 continue
@@ -258,49 +198,35 @@ def extract_pcp_rows(wb, year: int) -> pd.DataFrame:
                     continue
 
                 student_raw = ws.cell(r - 1, c).value
-                student = normalize_student(student_raw if isinstance(student_raw, str) else "")
+                student = normalize_student(student_raw)
                 if not student:
                     continue
 
-                location = current_group if current_group else sheet_name
-                if current_group and current_group != sheet_name:
-                    location = f"{sheet_name} - {current_group}"
+                rows.append({
+                    "Student Name": student,
+                    "Date (YYYY-MM-DD)": date.isoformat(),
+                    "Start Time (HH:MM)": sh["start"],
+                    "End Time (HH:MM)": sh["end"],
+                    "Location": sheet_name,
+                    "Station": sh["station"],
+                    "Ambulance Number": sh["ambulance"],
+                    "Preceptor": preceptor,
+                })
 
-                all_rows.append(
-                    {
-                        "Student Name": student,
-                        "Date (YYYY-MM-DD)": date.isoformat(),
-                        "Start Time (HH:MM)": sh["start"],
-                        "End Time (HH:MM)": sh["end"],
-                        "Location": location,
-                        "Station": sh["station"],
-                        "Ambulance Number": sh["ambulance"],
-                        "Preceptor": preceptor,
-                    }
-                )
-
-    return pd.DataFrame(all_rows)
+    return pd.DataFrame(rows)
 
 
-# ===================== ACP EXTRACTOR =====================
+# ===================== ACP =====================
 
 def is_student_marker(v) -> bool:
     return isinstance(v, str) and v.strip().upper().startswith("STUDENT")
 
 
 def extract_acp_rows(wb, year: int) -> pd.DataFrame:
-    """
-    ACP (.xlsm):
-    - single sheet
-    - dates start column C (A=preceptor, B=email)
-    - student rows (STUDENT 1/2) apply to the NEXT preceptor row BELOW them
-    - allow multiple students per shift (one output row per student)
-    """
     ws = wb[wb.sheetnames[0]]
-    col_dates = parse_header_dates(ws, year, start_col=3)  # C
+    col_dates = parse_header_dates(ws, year, start_col=3)
 
     rows: List[dict] = []
-    current_group = None
     pending_student_rows: List[int] = []
 
     for r in range(2, ws.max_row + 1):
@@ -310,19 +236,13 @@ def extract_acp_rows(wb, year: int) -> pd.DataFrame:
 
         a_str = a.strip()
 
-        if is_group_header(a_str):
-            current_group = a_str
-            pending_student_rows = []
+        if a_str.upper().startswith("STUDENT"):
+            pending_student_rows.append(r)
             continue
 
         if a_str == "Preceptor":
             continue
 
-        if is_student_marker(a_str):
-            pending_student_rows.append(r)
-            continue
-
-        # preceptor row
         preceptor = format_preceptor(a_str)
         student_rows = pending_student_rows
         pending_student_rows = []
@@ -336,53 +256,31 @@ def extract_acp_rows(wb, year: int) -> pd.DataFrame:
             if not sh:
                 continue
 
-            collected: List[str] = []
             for sr in student_rows:
                 raw = ws.cell(sr, c).value
-                student = normalize_student(raw if isinstance(raw, str) else "")
-                if student:
-                    collected.append(student)
+                student = normalize_student(raw)
+                if not student:
+                    continue
 
-            # de-dupe, preserve order
-            seen = set()
-            students: List[str] = []
-            for s in collected:
-                key = s.lower()
-                if key not in seen:
-                    seen.add(key)
-                    students.append(s)
-
-            if not students:
-                continue
-
-            location = current_group if current_group else "ACP"
-
-            for student in students:
-                rows.append(
-                    {
-                        "Student Name": student,
-                        "Date (YYYY-MM-DD)": date.isoformat(),
-                        "Start Time (HH:MM)": sh["start"],
-                        "End Time (HH:MM)": sh["end"],
-                        "Location": location,
-                        "Station": sh["station"],
-                        "Ambulance Number": sh["ambulance"],
-                        "Preceptor": preceptor,
-                    }
-                )
+                rows.append({
+                    "Student Name": student,
+                    "Date (YYYY-MM-DD)": date.isoformat(),
+                    "Start Time (HH:MM)": sh["start"],
+                    "End Time (HH:MM)": sh["end"],
+                    "Location": "ACP",
+                    "Station": sh["station"],
+                    "Ambulance Number": sh["ambulance"],
+                    "Preceptor": preceptor,
+                })
 
     return pd.DataFrame(rows)
 
 
-# ===================== PUBLIC API (used by Streamlit) =====================
+# ===================== PUBLIC API =====================
 
 def extract_rows_from_workbook(xlsx_bytes: bytes, year: int, mode: str) -> pd.DataFrame:
-    """
-    mode: "ACP" or "PCP"
-    """
     wb = load_workbook(filename=bytes_to_filelike(xlsx_bytes), data_only=True)
-    mode = (mode or "").strip().upper()
-    if mode == "ACP":
+    if mode.upper() == "ACP":
         return extract_acp_rows(wb, year)
     return extract_pcp_rows(wb, year)
 
