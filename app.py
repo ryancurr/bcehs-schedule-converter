@@ -3,7 +3,11 @@ from pathlib import Path
 
 import streamlit as st
 
-from converter import extract_rows_from_workbook, apply_template_columns
+from converter import (
+    extract_rows_from_workbook,
+    extract_open_shift_rows_from_workbook,
+    apply_template_columns,
+)
 
 
 st.set_page_config(
@@ -64,9 +68,27 @@ def run_conversion(mode: str):
             str(TEMPLATE_PATH),
         )
 
-        st.success(
-            f"{mode} conversion complete! Rows exported: {len(out_df)}"
-        )
+        open_df = None
+        if mode == "ACP":
+            open_extracted = extract_open_shift_rows_from_workbook(
+                workbook_bytes,
+                int(year),
+                mode,
+            )
+            open_df, _ = apply_template_columns(
+                open_extracted,
+                str(TEMPLATE_PATH),
+            )
+
+        if mode == "ACP":
+            st.success(
+                f"ACP conversion complete! Assigned rows: {len(out_df)}. "
+                f"Open TBD rows: {len(open_df)}."
+            )
+        else:
+            st.success(
+                f"{mode} conversion complete! Rows exported: {len(out_df)}"
+            )
 
         out_name = f"bcehs-populated-template_{mode}.csv"
         out_csv = out_df.to_csv(index=False).encode("utf-8")
@@ -77,6 +99,15 @@ def run_conversion(mode: str):
             file_name=out_name,
             mime="text/csv",
         )
+
+        if mode == "ACP" and open_df is not None:
+            open_csv = open_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download ACP Open Shift Template CSV",
+                data=open_csv,
+                file_name="ACP Open Shift Template.csv",
+                mime="text/csv",
+            )
 
         if debug:
             debug_name = f"bcehs-debug_{mode}.csv"
@@ -89,11 +120,18 @@ def run_conversion(mode: str):
                 mime="text/csv",
             )
 
-        st.subheader("Preview (first 50 rows)")
+        st.subheader("Assigned schedule preview (first 50 rows)")
         st.dataframe(
             out_df.head(50),
             use_container_width=True,
         )
+
+        if mode == "ACP" and open_df is not None:
+            st.subheader("ACP open shifts preview (first 50 rows)")
+            st.dataframe(
+                open_df.head(50),
+                use_container_width=True,
+            )
 
     except Exception as exc:
         st.error(f"{mode} conversion failed.")
