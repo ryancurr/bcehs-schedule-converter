@@ -427,12 +427,20 @@ def extract_pcp_rows(wb, year: int) -> pd.DataFrame:
 
             for c, date in col_dates.items():
                 shift_value = get_cell_value(ws, r, c, merged_map)
-                shift = parse_shift(shift_value) if isinstance(shift_value, str) else None
+                shift = parse_shift(
+                    shift_value
+                ) if isinstance(shift_value, str) else None
 
                 if not shift:
                     continue
 
-                student_raw = get_cell_value(ws, r - 1, c, merged_map)
+                student_raw = get_cell_value(
+                    ws,
+                    r - 1,
+                    c,
+                    merged_map,
+                )
+
                 student = normalize_student_pcp(
                     student_raw if isinstance(student_raw, str) else ""
                 )
@@ -441,6 +449,7 @@ def extract_pcp_rows(wb, year: int) -> pd.DataFrame:
                     continue
 
                 location = current_group if current_group else sheet_name
+
                 if current_group and current_group != sheet_name:
                     location = f"{sheet_name} - {current_group}"
 
@@ -470,6 +479,13 @@ def is_student_marker(value) -> bool:
     )
 
 
+def is_tbd_marker(value) -> bool:
+    return (
+        isinstance(value, str)
+        and value.strip().lower() == "tbd"
+    )
+
+
 def extract_acp_rows_from_grid(
     max_row: int,
     max_col: int,
@@ -489,7 +505,11 @@ def extract_acp_rows_from_grid(
     # Do not assume where the first date column is. The September 2026
     # file added "Mentor / Preceptor" in column C, moving dates to D.
     for c in range(max_col):
-        parsed = parse_header_date(get_value(0, c), year)
+        parsed = parse_header_date(
+            get_value(0, c),
+            year,
+        )
+
         if parsed:
             col_dates[c] = parsed
 
@@ -521,6 +541,7 @@ def extract_acp_rows_from_grid(
         # Any non-marker row here is the next preceptor row below the
         # accumulated STUDENT / STUDENT 1 / STUDENT 2 rows.
         preceptor = format_preceptor(a_str)
+
         student_rows = pending_student_rows
         pending_student_rows = []
 
@@ -529,7 +550,10 @@ def extract_acp_rows_from_grid(
 
         for c, date in col_dates.items():
             shift_value = get_value(r, c)
-            shift = parse_shift(shift_value) if isinstance(shift_value, str) else None
+
+            shift = parse_shift(
+                shift_value
+            ) if isinstance(shift_value, str) else None
 
             if not shift:
                 continue
@@ -537,7 +561,11 @@ def extract_acp_rows_from_grid(
             collected_students: List[str] = []
 
             for student_row in student_rows:
-                raw = get_value(student_row, c)
+                raw = get_value(
+                    student_row,
+                    c,
+                )
+
                 student = normalize_student_acp(
                     raw if isinstance(raw, str) else ""
                 )
@@ -551,6 +579,7 @@ def extract_acp_rows_from_grid(
 
             for student in collected_students:
                 key = student.lower()
+
                 if key not in seen:
                     seen.add(key)
                     students.append(student)
@@ -572,18 +601,148 @@ def extract_acp_rows_from_grid(
     return pd.DataFrame(rows)
 
 
+def extract_acp_open_rows_from_grid(
+    max_row: int,
+    max_col: int,
+    get_value: Callable[[int, int], object],
+    year: int,
+) -> pd.DataFrame:
+    """
+    Extract ACP open student slots.
+
+    Every STUDENT / STUDENT 1 / STUDENT 2 cell containing TBD creates
+    one output row with Student Name set to "TBD". This works whether
+    the other student slot is filled by a Columbia student, is also TBD,
+    or is empty.
+    """
+    col_dates: Dict[int, dt.date] = {}
+
+    for c in range(max_col):
+        parsed = parse_header_date(
+            get_value(0, c),
+            year,
+        )
+
+        if parsed:
+            col_dates[c] = parsed
+
+    if not col_dates:
+        return pd.DataFrame()
+
+    rows: List[dict] = []
+    pending_student_rows: List[int] = []
+
+    for r in range(1, max_row):
+        a = get_value(r, 0)
+
+        if not isinstance(a, str) or not a.strip():
+            continue
+
+        a_str = a.strip()
+
+        if a_str == "Preceptor":
+            continue
+
+        if is_acp_group_header(a_str):
+            pending_student_rows = []
+            continue
+
+        if is_student_marker(a_str):
+            pending_student_rows.append(r)
+            continue
+
+        preceptor = format_preceptor(a_str)
+
+        student_rows = pending_student_rows
+        pending_student_rows = []
+
+        if not student_rows:
+            continue
+
+        for c, date in col_dates.items():
+            shift_value = get_value(r, c)
+
+            shift = parse_shift(
+                shift_value
+            ) if isinstance(shift_value, str) else None
+
+            if not shift:
+                continue
+
+            # Each TBD student row represents one available student slot.
+            open_slots = sum(
+                1
+                for student_row in student_rows
+                if is_tbd_marker(
+                    get_value(
+                        student_row,
+                        c,
+                    )
+                )
+            )
+
+            for _ in range(open_slots):
+                rows.append(
+                    {
+                        "Student Name": "TBD",
+                        "Date (YYYY-MM-DD)": date.isoformat(),
+                        "Start Time (HH:MM)": shift["start"],
+                        "End Time (HH:MM)": shift["end"],
+                        "Location": "ACP",
+                        "Station": shift["station"],
+                        "Ambulance Number": shift["ambulance"],
+                        "Preceptor": preceptor,
+                    }
+                )
+
+    return pd.DataFrame(rows)
+
+
 # ===================== ACP: XLSX / XLSM =====================
 
 
-def extract_acp_rows_openpyxl(wb, year: int) -> pd.DataFrame:
+def extract_acp_rows_openpyxl(
+    wb,
+    year: int,
+) -> pd.DataFrame:
     ws = wb[wb.sheetnames[0]]
+
     merged_map = build_merged_map(ws)
 
     def get_value(r: int, c: int):
         # Generic ACP grid is zero-based; OpenPyXL is one-based.
-        return get_cell_value(ws, r + 1, c + 1, merged_map)
+        return get_cell_value(
+            ws,
+            r + 1,
+            c + 1,
+            merged_map,
+        )
 
     return extract_acp_rows_from_grid(
+        max_row=ws.max_row,
+        max_col=ws.max_column,
+        get_value=get_value,
+        year=year,
+    )
+
+
+def extract_acp_open_rows_openpyxl(
+    wb,
+    year: int,
+) -> pd.DataFrame:
+    ws = wb[wb.sheetnames[0]]
+
+    merged_map = build_merged_map(ws)
+
+    def get_value(r: int, c: int):
+        return get_cell_value(
+            ws,
+            r + 1,
+            c + 1,
+            merged_map,
+        )
+
+    return extract_acp_open_rows_from_grid(
         max_row=ws.max_row,
         max_col=ws.max_column,
         get_value=get_value,
@@ -594,7 +753,10 @@ def extract_acp_rows_openpyxl(wb, year: int) -> pd.DataFrame:
 # ===================== ACP: LEGACY .XLS =====================
 
 
-def extract_acp_rows_xls(file_bytes: bytes, year: int) -> pd.DataFrame:
+def extract_acp_rows_xls(
+    file_bytes: bytes,
+    year: int,
+) -> pd.DataFrame:
     """
     Read old binary Excel .xls files using xlrd.
 
@@ -605,8 +767,8 @@ def extract_acp_rows_xls(file_bytes: bytes, year: int) -> pd.DataFrame:
         import xlrd
     except ImportError as exc:
         raise RuntimeError(
-            "This ACP schedule is an old .xls file. Add xlrd==2.0.1 "
-            "to requirements.txt so Streamlit can read it."
+            "This ACP schedule is an old .xls file. "
+            "Add xlrd==2.0.1 to requirements.txt so Streamlit can read it."
         ) from exc
 
     book = xlrd.open_workbook(
@@ -616,37 +778,190 @@ def extract_acp_rows_xls(file_bytes: bytes, year: int) -> pd.DataFrame:
 
     sheet = book.sheet_by_index(0)
 
-    merged_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    merged_map: Dict[
+        Tuple[int, int],
+        Tuple[int, int],
+    ] = {}
 
-    # xlrd merged ranges are (row_low, row_high, col_low, col_high)
+    # xlrd merged ranges are:
+    # (row_low, row_high, col_low, col_high)
     # with the high values EXCLUSIVE.
-    for row_low, row_high, col_low, col_high in sheet.merged_cells:
-        top_left = (row_low, col_low)
+    for (
+        row_low,
+        row_high,
+        col_low,
+        col_high,
+    ) in sheet.merged_cells:
 
-        for r in range(row_low, row_high):
-            for c in range(col_low, col_high):
+        top_left = (
+            row_low,
+            col_low,
+        )
+
+        for r in range(
+            row_low,
+            row_high,
+        ):
+            for c in range(
+                col_low,
+                col_high,
+            ):
                 merged_map[(r, c)] = top_left
 
-    def raw_value(r: int, c: int):
-        if r < 0 or c < 0 or r >= sheet.nrows or c >= sheet.ncols:
+    def raw_value(
+        r: int,
+        c: int,
+    ):
+        if (
+            r < 0
+            or c < 0
+            or r >= sheet.nrows
+            or c >= sheet.ncols
+        ):
             return None
 
-        return sheet.cell_value(r, c)
+        return sheet.cell_value(
+            r,
+            c,
+        )
 
-    def get_value(r: int, c: int):
-        value = raw_value(r, c)
+    def get_value(
+        r: int,
+        c: int,
+    ):
+        value = raw_value(
+            r,
+            c,
+        )
 
-        # xlrd usually represents an empty cell as "" rather than None.
-        if value not in (None, ""):
+        # xlrd usually represents an empty cell as ""
+        # rather than None.
+        if value not in (
+            None,
+            "",
+        ):
             return value
 
-        top_left = merged_map.get((r, c))
+        top_left = merged_map.get(
+            (
+                r,
+                c,
+            )
+        )
+
         if top_left:
-            return raw_value(top_left[0], top_left[1])
+            return raw_value(
+                top_left[0],
+                top_left[1],
+            )
 
         return value
 
     return extract_acp_rows_from_grid(
+        max_row=sheet.nrows,
+        max_col=sheet.ncols,
+        get_value=get_value,
+        year=year,
+    )
+
+
+def extract_acp_open_rows_xls(
+    file_bytes: bytes,
+    year: int,
+) -> pd.DataFrame:
+    """
+    Read TBD/open ACP student slots from a legacy binary .xls file.
+    """
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise RuntimeError(
+            "This ACP schedule is an old .xls file. "
+            "Add xlrd==2.0.1 to requirements.txt so Streamlit can read it."
+        ) from exc
+
+    book = xlrd.open_workbook(
+        file_contents=file_bytes,
+        formatting_info=True,
+    )
+
+    sheet = book.sheet_by_index(0)
+
+    merged_map: Dict[
+        Tuple[int, int],
+        Tuple[int, int],
+    ] = {}
+
+    for (
+        row_low,
+        row_high,
+        col_low,
+        col_high,
+    ) in sheet.merged_cells:
+
+        top_left = (
+            row_low,
+            col_low,
+        )
+
+        for r in range(
+            row_low,
+            row_high,
+        ):
+            for c in range(
+                col_low,
+                col_high,
+            ):
+                merged_map[(r, c)] = top_left
+
+    def raw_value(
+        r: int,
+        c: int,
+    ):
+        if (
+            r < 0
+            or c < 0
+            or r >= sheet.nrows
+            or c >= sheet.ncols
+        ):
+            return None
+
+        return sheet.cell_value(
+            r,
+            c,
+        )
+
+    def get_value(
+        r: int,
+        c: int,
+    ):
+        value = raw_value(
+            r,
+            c,
+        )
+
+        if value not in (
+            None,
+            "",
+        ):
+            return value
+
+        top_left = merged_map.get(
+            (
+                r,
+                c,
+            )
+        )
+
+        if top_left:
+            return raw_value(
+                top_left[0],
+                top_left[1],
+            )
+
+        return value
+
+    return extract_acp_open_rows_from_grid(
         max_row=sheet.nrows,
         max_col=sheet.ncols,
         get_value=get_value,
@@ -662,39 +977,109 @@ def extract_rows_from_workbook(
     year: int,
     mode: str,
 ) -> pd.DataFrame:
-    mode = (mode or "").strip().upper()
+    mode = (
+        mode or ""
+    ).strip().upper()
 
-    if mode == "ACP" and is_legacy_xls(workbook_bytes):
-        return extract_acp_rows_xls(workbook_bytes, year)
+    if (
+        mode == "ACP"
+        and is_legacy_xls(workbook_bytes)
+    ):
+        return extract_acp_rows_xls(
+            workbook_bytes,
+            year,
+        )
 
-    if mode == "PCP" and is_legacy_xls(workbook_bytes):
+    if (
+        mode == "PCP"
+        and is_legacy_xls(workbook_bytes)
+    ):
         raise ValueError(
             "PCP legacy .xls files are not supported. "
             "The current PCP schedule should remain .xlsx/.xlsm."
         )
 
     wb = load_workbook(
-        filename=bytes_to_filelike(workbook_bytes),
+        filename=bytes_to_filelike(
+            workbook_bytes,
+        ),
         data_only=True,
     )
 
     if mode == "ACP":
-        return extract_acp_rows_openpyxl(wb, year)
+        return extract_acp_rows_openpyxl(
+            wb,
+            year,
+        )
 
-    return extract_pcp_rows(wb, year)
+    return extract_pcp_rows(
+        wb,
+        year,
+    )
+
+
+def extract_open_shift_rows_from_workbook(
+    workbook_bytes: bytes,
+    year: int,
+    mode: str,
+) -> pd.DataFrame:
+    """
+    Return ACP TBD/open student slots.
+
+    PCP intentionally returns an empty DataFrame because the
+    open-shift feature is ACP-only.
+    """
+    mode = (
+        mode or ""
+    ).strip().upper()
+
+    if mode != "ACP":
+        return pd.DataFrame()
+
+    if is_legacy_xls(
+        workbook_bytes
+    ):
+        return extract_acp_open_rows_xls(
+            workbook_bytes,
+            year,
+        )
+
+    wb = load_workbook(
+        filename=bytes_to_filelike(
+            workbook_bytes,
+        ),
+        data_only=True,
+    )
+
+    return extract_acp_open_rows_openpyxl(
+        wb,
+        year,
+    )
 
 
 def apply_template_columns(
     extracted: pd.DataFrame,
     template_csv_path: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    template = pd.read_csv(template_csv_path)
-    template_columns = list(template.columns)
+) -> Tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+]:
+    template = pd.read_csv(
+        template_csv_path
+    )
+
+    template_columns = list(
+        template.columns
+    )
 
     if extracted.empty:
-        output = pd.DataFrame(columns=template_columns)
+        output = pd.DataFrame(
+            columns=template_columns
+        )
     else:
-        output = extracted[template_columns].copy()
+        output = extracted[
+            template_columns
+        ].copy()
 
     debug = extracted.copy()
 
